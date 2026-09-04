@@ -12,22 +12,43 @@ import matplotlib.pyplot as plt
 from . import read_dicom
 
 # Helper functions
+def read_seq_defs(seq_filename):
+    defs = {}
+    with open(seq_filename, 'r') as f:
+        in_defs = False
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith('['):
+                in_defs = (line == '[DEFINITIONS]')
+                continue
+            if not in_defs:
+                continue
+            parts = line.split()
+            key, values = parts[0], parts[1:]
+            parsed = []
+            for v in values:
+                try:
+                    parsed.append(int(v))
+                except ValueError:
+                    try:
+                        parsed.append(float(v))
+                    except ValueError:
+                        parsed.append(v)  # leave as string (e.g. Name)
+            defs[key] = parsed[0] if len(parsed) == 1 else np.array(parsed)
+    return defs
+
 def align_grad_raster(time, sys):
     return np.ceil(time / sys.grad_raster_time) * sys.grad_raster_time
 
-def draw_roi(b1_map, myocardium):
+def draw_roi(b1_map):
     fig, ax = plt.subplots()
     ax.imshow(b1_map, cmap='gray')
     ax.axis('off')
-    if myocardium:
-        rois = roipoly.MultiRoi(roi_names=['Epicardium', 'Endocardium'])
-        mask_epi = rois.rois['Epicardium'].get_mask(b1_map)
-        mask_endo = rois.rois['Endocardium'].get_mask(b1_map)
-        final_mask = np.logical_and(mask_epi, np.logical_not(mask_endo))
-    else:
-        ax.set_title('Draw ROI')
-        roi = roipoly.RoiPoly()
-        final_mask = roi.get_mask(b1_map)
+    ax.set_title('Draw ROI')
+    roi = roipoly.RoiPoly()
+    final_mask = roi.get_mask(b1_map)
     return final_mask
 
 def domintrap_pypulseq(area_m_inv, sys, channel='z'):
@@ -66,21 +87,16 @@ def find_optimal_spsp_pair(sys, target_duration_s=250e-6, min_flat_time_s=50e-6)
     final_trap2 = pp.make_trapezoid(channel='z', system=safe_sys, area=-final_trap1.area)
     return final_trap1, final_trap2
 
-def calc_spsp(b1_map, seq_filename, tp, sys, myocardium):
+def calc_spsp(b1_map, seq_filename, tp, sys, mask):
     if seq_filename != 'dicom':
-        # Load sequence and defs
-        seq = pp.Sequence()
-        seq.read(seq_filename)
-        # Get parameters
-        defs = seq.definitions
-        fov = defs['FOV'] # [m]
+        defs = read_seq_defs(seq_filename)
+        fov = defs['FOV']  # [m]
         nx = defs['Nx']
-
+        dx = fov[0] / nx
+        dy = fov[1] / nx
     else:
-        b1_map, nx, fov = read_dicom.dicom_b1_siemens(b1_map)
+        b1_map, nx, dx, dy = read_dicom.dicom_b1(b1_map)
     
-    dx = fov[0] / nx # Pixel spacing [m]
-    dy = fov[1] / nx # Pixel spacing (y) [m]
     gambar = sys.gamma/1e4
     
     # Make meshgrid
@@ -89,7 +105,8 @@ def calc_spsp(b1_map, seq_filename, tp, sys, myocardium):
     x, y = np.meshgrid(x_lin, y_lin)
     
     # Draw mask on B1 map
-    mask = draw_roi(b1_map, myocardium)
+    if mask is None:
+        mask = draw_roi(b1_map)
     x_masked = x[mask]
     y_masked = y[mask]
     b1_masked = b1_map[mask]
@@ -207,7 +224,7 @@ def calc_spsp(b1_map, seq_filename, tp, sys, myocardium):
         times = [0.0]
         amps = [0.0]
         current_time = 0.0
-        raster = sys.grad_raster_time  # capture from outer scope
+        raster = sys.grad_raster_time  
         
         for item in items:
             if isinstance(item, (int, float, np.number)):
@@ -337,6 +354,7 @@ def calc_spsp(b1_map, seq_filename, tp, sys, myocardium):
         'full_gx': full_gx,
         'full_gy': full_gy, 
         'full_rf': full_rf,
+        'achieved_duration': full_rf.size * dt, 
         'prewinder_rf_delay': prewinder_rf_delay,
         'num_subpulses': num_subpulses,
         'weights': weights,
